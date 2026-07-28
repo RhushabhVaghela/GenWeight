@@ -1,4 +1,5 @@
 from genweight import ModelLoader
+from genweight import WeightStatistics
 
 
 def main():
@@ -7,23 +8,25 @@ def main():
 
     loader.load()
 
-    print("\nTotal Parameters")
-
-    print(f"{loader.parameter_count():,}\n")
-
-    print("Listing Parameters...\n")
-
-    loader.list_parameters()
-
     weight = loader.get_parameter(
         "h.0.attn.c_attn.weight"
     )
 
-    print("\nSelected Matrix")
+    stats = WeightStatistics(weight)
 
-    print(weight.shape)
+    summary = stats.summary()
 
-    print(weight.dtype)
+    print()
+
+    print("=" * 60)
+
+    print("Weight Statistics")
+
+    print("=" * 60)
+
+    for key, value in summary.items():
+
+        print(f"{key:<20} : {value}")
 
 
 if __name__ == "__main__":
