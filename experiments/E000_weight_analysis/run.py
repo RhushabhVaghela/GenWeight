@@ -37,6 +37,7 @@ def main() -> None:
     qkv_similarity_summary = qkv.summary()
     high_qk_pairs = qkv.aligned_pairs_above(0, 1, threshold=0.75)
     top_qk_head_pairs = qkv.top_head_pairs(0, 1)
+    qk_reuse_report = qkv.same_index_reuse_report()
 
     print("\n" + "=" * 60)
     print("Weight Statistics")
@@ -109,6 +110,15 @@ def main() -> None:
             f"cosine={pair['cosine_similarity']:.4f}"
         )
 
+    print("\nSame-Index Q→K Scalar Reuse")
+    for item in qk_reuse_report:
+        print(
+            f"head={item['head']:<2} "
+            f"scale={item['scale']:7.4f} "
+            f"cosine={item['cosine_similarity']:7.4f} "
+            f"residual={item['relative_residual'] * 100:6.2f}%"
+        )
+
     visualizer = WeightVisualizer(weight)
     visualizer.histogram(
         bins=100,
@@ -148,6 +158,7 @@ def main() -> None:
                 **qkv_similarity_summary,
                 "high_qk_pairs": high_qk_pairs,
                 "top_qk_head_pairs": top_qk_head_pairs,
+                "qk_scalar_reuse": qk_reuse_report,
             },
             file,
             indent=2,

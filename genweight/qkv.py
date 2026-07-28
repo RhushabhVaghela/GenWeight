@@ -120,6 +120,53 @@ class QKVSimilarityAnalyzer:
             for score, position in zip(scores, positions)
         ]
 
+    def same_index_reuse_report(
+        self, source_segment: int = 0, target_segment: int = 1
+    ) -> list[dict[str, float | int]]:
+        """Fit one scalar per matching head and report target reconstruction residuals.
+
+        For each head, this tests ``target ≈ scale × source``. The relative
+        residual is the fraction of target L2 norm that this simple reusable
+        representation fails to explain.
+        """
+        if not 0 <= source_segment < 3 or not 0 <= target_segment < 3:
+            raise ValueError("segment indices must be in the range 0 through 2.")
+        if source_segment == target_segment:
+            raise ValueError("source and target segments must be different.")
+
+        rows, columns = self.tensor.shape
+        segment_width = columns // 3
+        head_count = segment_width // self.block_size
+        segments = self.tensor.reshape(rows, 3, segment_width).permute(1, 0, 2)
+        heads = segments.reshape(3, rows, head_count, self.block_size)
+        heads = heads.permute(0, 2, 1, 3).reshape(3, head_count, -1)
+        source_heads = heads[source_segment]
+        target_heads = heads[target_segment]
+        report = []
+
+        for head_index in range(head_count):
+            source = source_heads[head_index]
+            target = target_heads[head_index]
+            scale = torch.dot(source, target) / torch.dot(source, source)
+            residual = target - scale * source
+            relative_residual = (
+                torch.linalg.vector_norm(residual) / torch.linalg.vector_norm(target)
+            ).item()
+            cosine_similarity = (
+                torch.dot(source, target)
+                / (torch.linalg.vector_norm(source) * torch.linalg.vector_norm(target))
+            ).item()
+            report.append(
+                {
+                    "head": head_index,
+                    "scale": scale.item(),
+                    "cosine_similarity": cosine_similarity,
+                    "relative_residual": relative_residual,
+                }
+            )
+
+        return report
+
     def plot_head_similarity(
         self,
         first_segment: int,
