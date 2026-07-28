@@ -1,43 +1,45 @@
-from genweight import ModelLoader, WeightStatistics, WeightVisualizer
+import json
+from pathlib import Path
+
+from genweight import ModelLoader, SVDAnalyzer, WeightStatistics, WeightVisualizer
 
 
-def main():
+def main() -> None:
+    result_directory = Path("results/E000_weight_analysis")
 
     loader = ModelLoader("gpt2")
-
     loader.load()
+    weight = loader.get_parameter("h.0.attn.c_attn.weight")
 
-    weight = loader.get_parameter(
-        "h.0.attn.c_attn.weight"
-    )
+    statistics_summary = WeightStatistics(weight).summary()
+    svd = SVDAnalyzer(weight)
+    svd_summary = svd.summary()
 
-    stats = WeightStatistics(weight)
-
-    summary = stats.summary()
-
-    print()
-
-    print("=" * 60)
-
+    print("\n" + "=" * 60)
     print("Weight Statistics")
-
     print("=" * 60)
-
-    for key, value in summary.items():
-
+    for key, value in statistics_summary.items():
         print(f"{key:<20} : {value}")
 
-    # Visualization
-    visualizer = WeightVisualizer(weight)
+    print("\n" + "=" * 60)
+    print("SVD Analysis")
+    print("=" * 60)
+    for key, value in svd_summary.items():
+        print(f"{key:<20} : {value}")
 
+    visualizer = WeightVisualizer(weight)
     visualizer.histogram(
         bins=100,
-        save_path="results/weight_distribution.png",
+        save_path=result_directory / "weight_distribution.png",
+    )
+    visualizer.heatmap(save_path=result_directory / "weight_heatmap.png")
+    svd.plot_singular_values(
+        save_path=result_directory / "singular_value_spectrum.png"
     )
 
-    visualizer.heatmap(
-        save_path="results/weight_heatmap.png",
-    )
+    result_directory.mkdir(parents=True, exist_ok=True)
+    with (result_directory / "summary.json").open("w", encoding="utf-8") as file:
+        json.dump({**statistics_summary, **svd_summary}, file, indent=2)
 
 
 if __name__ == "__main__":
