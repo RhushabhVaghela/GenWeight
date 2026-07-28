@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from genweight import (
+    BlockSimilarityAnalyzer,
     GaussianSVDBaseline,
     LowRankAnalyzer,
     ModelLoader,
@@ -28,6 +29,8 @@ def main() -> None:
     ranks = [32, 64, 128, 256, 399, 512, 662]
     low_rank = LowRankAnalyzer(weight)
     low_rank_summary = low_rank.summary_for_ranks(ranks)
+    blocks = BlockSimilarityAnalyzer(weight, block_size=64)
+    block_similarity_summary = blocks.summary()
 
     print("\n" + "=" * 60)
     print("Weight Statistics")
@@ -64,6 +67,12 @@ def main() -> None:
             f"error={item['relative_frobenius_error'] * 100:6.2f}%"
         )
 
+    print("\n" + "=" * 60)
+    print("Block Similarity")
+    print("=" * 60)
+    for key, value in block_similarity_summary.items():
+        print(f"{key:<32} : {value}")
+
     visualizer = WeightVisualizer(weight)
     visualizer.histogram(
         bins=100,
@@ -80,6 +89,9 @@ def main() -> None:
         ranks,
         save_path=result_directory / "low_rank_tradeoff.png",
     )
+    blocks.plot_similarity_matrix(
+        save_path=result_directory / "block_similarity.png"
+    )
 
     result_directory.mkdir(parents=True, exist_ok=True)
     with (result_directory / "summary.json").open("w", encoding="utf-8") as file:
@@ -90,6 +102,7 @@ def main() -> None:
                 **gaussian_summary,
                 **correlation_summary,
                 "low_rank_baseline": low_rank_summary,
+                **block_similarity_summary,
             },
             file,
             indent=2,
