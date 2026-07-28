@@ -3,6 +3,7 @@ GenWeight Research Library
 """
 
 from .baselines import GaussianSVDBaseline
+from .block_pca import BlockPCABaseline
 from .correlation import SpatialCorrelationAnalyzer
 from .dictionary import BlockDictionaryAnalyzer
 from .generators import BlockWeightGenerator, CoordinateWeightGenerator
