@@ -12,11 +12,11 @@ PARAMETER_NAME = "h.0.attn.c_attn.weight"
 BLOCK_SIZE = 64
 LATENT_DIM = 32
 HIDDEN_DIM = 64
-TRAINING_STEPS = 2_000
+TRAINING_STEPS = 5_000
 BATCH_SIZE = 16
 LEARNING_RATE = 1e-3
 SEED = 0
-EVALUATION_INTERVAL = 250
+EVALUATION_INTERVAL = 500
 
 
 def extract_blocks(matrix: torch.Tensor, block_size: int) -> torch.Tensor:
@@ -58,7 +58,7 @@ def main() -> None:
         latent_dim=LATENT_DIM,
         hidden_dim=HIDDEN_DIM,
     ).to(device)
-    optimizer = torch.optim.AdamW(generator.parameters(), lr=LEARNING_RATE)
+    optimizer = torch.optim.Adam(generator.parameters(), lr=LEARNING_RATE)
     loss_function = nn.MSELoss()
     reconstruction_history = []
 
