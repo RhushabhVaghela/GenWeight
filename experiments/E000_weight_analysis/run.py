@@ -1,5 +1,4 @@
-from genweight import ModelLoader
-from genweight import WeightStatistics
+from genweight import ModelLoader, WeightStatistics, WeightVisualizer
 
 
 def main():
@@ -27,6 +26,18 @@ def main():
     for key, value in summary.items():
 
         print(f"{key:<20} : {value}")
+
+    # Visualization
+    visualizer = WeightVisualizer(weight)
+
+    visualizer.histogram(
+        bins=100,
+        save_path="results/weight_distribution.png",
+    )
+
+    visualizer.heatmap(
+        save_path="results/weight_heatmap.png",
+    )
 
 
 if __name__ == "__main__":
