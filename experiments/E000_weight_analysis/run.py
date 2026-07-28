@@ -3,6 +3,7 @@ from pathlib import Path
 
 from genweight import (
     GaussianSVDBaseline,
+    LowRankAnalyzer,
     ModelLoader,
     SVDAnalyzer,
     SpatialCorrelationAnalyzer,
@@ -24,6 +25,9 @@ def main() -> None:
     gaussian_summary = GaussianSVDBaseline(weight).summary()
     correlation = SpatialCorrelationAnalyzer(weight)
     correlation_summary = correlation.summary()
+    ranks = [32, 64, 128, 256, 399, 512, 662]
+    low_rank = LowRankAnalyzer(weight)
+    low_rank_summary = low_rank.summary_for_ranks(ranks)
 
     print("\n" + "=" * 60)
     print("Weight Statistics")
@@ -50,6 +54,16 @@ def main() -> None:
     for key, value in correlation_summary.items():
         print(f"{key:<32} : {value}")
 
+    print("\n" + "=" * 60)
+    print("Low-Rank Reconstruction Baseline")
+    print("=" * 60)
+    for item in low_rank_summary:
+        print(
+            f"rank={item['rank']:<3} "
+            f"parameters={item['parameter_ratio'] * 100:6.2f}% "
+            f"error={item['relative_frobenius_error'] * 100:6.2f}%"
+        )
+
     visualizer = WeightVisualizer(weight)
     visualizer.histogram(
         bins=100,
@@ -62,6 +76,10 @@ def main() -> None:
     correlation.plot_lag_correlations(
         save_path=result_directory / "spatial_correlation_by_lag.png"
     )
+    low_rank.plot_tradeoff(
+        ranks,
+        save_path=result_directory / "low_rank_tradeoff.png",
+    )
 
     result_directory.mkdir(parents=True, exist_ok=True)
     with (result_directory / "summary.json").open("w", encoding="utf-8") as file:
@@ -71,6 +89,7 @@ def main() -> None:
                 **svd_summary,
                 **gaussian_summary,
                 **correlation_summary,
+                "low_rank_baseline": low_rank_summary,
             },
             file,
             indent=2,
