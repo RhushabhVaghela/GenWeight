@@ -1,0 +1,9 @@
+README.md
+pyproject.toml
+genweight/__init__.py
+genweight/loader.py
+genweight.egg-info/PKG-INFO
+genweight.egg-info/SOURCES.txt
+genweight.egg-info/dependency_links.txt
+genweight.egg-info/requires.txt
+genweight.egg-info/top_level.txt
