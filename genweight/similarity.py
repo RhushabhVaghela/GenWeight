@@ -60,6 +60,38 @@ class BlockSimilarityAnalyzer:
             "blocks_similarity_over_0_9": int((off_diagonal > 0.9).sum().item()),
         }
 
+    def top_similar_pairs(self, count: int = 10) -> list[dict[str, float | int]]:
+        """Return the most similar distinct block pairs and their grid coordinates."""
+        if count < 1:
+            raise ValueError("count must be at least 1.")
+
+        similarities = self.similarity_matrix
+        row_indices, column_indices = torch.triu_indices(
+            similarities.shape[0], similarities.shape[1], offset=1
+        )
+        pair_scores = similarities[row_indices, column_indices]
+        pair_count = min(count, pair_scores.numel())
+        top_scores, top_positions = torch.topk(pair_scores, k=pair_count)
+        blocks_per_row = self.tensor.shape[1] // self.block_size
+        pairs = []
+
+        for score, position in zip(top_scores, top_positions):
+            first_block = row_indices[position].item()
+            second_block = column_indices[position].item()
+            pairs.append(
+                {
+                    "first_block": first_block,
+                    "first_row_block": first_block // blocks_per_row,
+                    "first_column_block": first_block % blocks_per_row,
+                    "second_block": second_block,
+                    "second_row_block": second_block // blocks_per_row,
+                    "second_column_block": second_block % blocks_per_row,
+                    "cosine_similarity": score.item(),
+                }
+            )
+
+        return pairs
+
     def plot_similarity_matrix(self, save_path: str | Path | None = None) -> None:
         """Save a heatmap of pairwise block cosine similarities."""
         figure, axis = plt.subplots(figsize=(10, 8))

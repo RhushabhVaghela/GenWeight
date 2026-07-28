@@ -31,6 +31,7 @@ def main() -> None:
     low_rank_summary = low_rank.summary_for_ranks(ranks)
     blocks = BlockSimilarityAnalyzer(weight, block_size=64)
     block_similarity_summary = blocks.summary()
+    top_block_pairs = blocks.top_similar_pairs()
 
     print("\n" + "=" * 60)
     print("Weight Statistics")
@@ -73,6 +74,14 @@ def main() -> None:
     for key, value in block_similarity_summary.items():
         print(f"{key:<32} : {value}")
 
+    print("\nTop Similar Block Pairs")
+    for pair in top_block_pairs:
+        print(
+            f"({pair['first_row_block']}, {pair['first_column_block']}) ↔ "
+            f"({pair['second_row_block']}, {pair['second_column_block']}) "
+            f"cosine={pair['cosine_similarity']:.4f}"
+        )
+
     visualizer = WeightVisualizer(weight)
     visualizer.histogram(
         bins=100,
@@ -103,6 +112,7 @@ def main() -> None:
                 **correlation_summary,
                 "low_rank_baseline": low_rank_summary,
                 **block_similarity_summary,
+                "top_block_pairs": top_block_pairs,
             },
             file,
             indent=2,
