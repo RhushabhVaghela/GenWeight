@@ -6,6 +6,7 @@ from genweight import (
     GaussianSVDBaseline,
     LowRankAnalyzer,
     ModelLoader,
+    QKVSimilarityAnalyzer,
     SVDAnalyzer,
     SpatialCorrelationAnalyzer,
     WeightStatistics,
@@ -32,6 +33,7 @@ def main() -> None:
     blocks = BlockSimilarityAnalyzer(weight, block_size=64)
     block_similarity_summary = blocks.summary()
     top_block_pairs = blocks.top_similar_pairs()
+    qkv_similarity_summary = QKVSimilarityAnalyzer(weight, block_size=64).summary()
 
     print("\n" + "=" * 60)
     print("Weight Statistics")
@@ -82,6 +84,12 @@ def main() -> None:
             f"cosine={pair['cosine_similarity']:.4f}"
         )
 
+    print("\n" + "=" * 60)
+    print("Aligned Q/K/V Block Similarity")
+    print("=" * 60)
+    for key, value in qkv_similarity_summary.items():
+        print(f"{key:<32} : {value}")
+
     visualizer = WeightVisualizer(weight)
     visualizer.histogram(
         bins=100,
@@ -113,6 +121,7 @@ def main() -> None:
                 "low_rank_baseline": low_rank_summary,
                 **block_similarity_summary,
                 "top_block_pairs": top_block_pairs,
+                **qkv_similarity_summary,
             },
             file,
             indent=2,
