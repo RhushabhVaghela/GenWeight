@@ -4,6 +4,7 @@ GenWeight Research Library
 
 from .baselines import GaussianSVDBaseline
 from .correlation import SpatialCorrelationAnalyzer
+from .dictionary import BlockDictionaryAnalyzer
 from .generators import CoordinateWeightGenerator
 from .loader import ModelLoader
 from .low_rank import LowRankAnalyzer
