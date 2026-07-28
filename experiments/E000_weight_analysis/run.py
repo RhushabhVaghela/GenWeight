@@ -33,7 +33,9 @@ def main() -> None:
     blocks = BlockSimilarityAnalyzer(weight, block_size=64)
     block_similarity_summary = blocks.summary()
     top_block_pairs = blocks.top_similar_pairs()
-    qkv_similarity_summary = QKVSimilarityAnalyzer(weight, block_size=64).summary()
+    qkv = QKVSimilarityAnalyzer(weight, block_size=64)
+    qkv_similarity_summary = qkv.summary()
+    high_qk_pairs = qkv.aligned_pairs_above(0, 1, threshold=0.75)
 
     print("\n" + "=" * 60)
     print("Weight Statistics")
@@ -90,6 +92,14 @@ def main() -> None:
     for key, value in qkv_similarity_summary.items():
         print(f"{key:<32} : {value}")
 
+    print("\nHigh-Similarity Q/K Block Locations")
+    for pair in high_qk_pairs:
+        print(
+            f"row_block={pair['row_block']:<2} "
+            f"column_block={pair['column_block']:<2} "
+            f"cosine={pair['cosine_similarity']:.4f}"
+        )
+
     visualizer = WeightVisualizer(weight)
     visualizer.histogram(
         bins=100,
@@ -122,6 +132,7 @@ def main() -> None:
                 **block_similarity_summary,
                 "top_block_pairs": top_block_pairs,
                 **qkv_similarity_summary,
+                "high_qk_pairs": high_qk_pairs,
             },
             file,
             indent=2,

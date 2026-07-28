@@ -54,3 +54,30 @@ class QKVSimilarityAnalyzer:
             result[f"{prefix}_over_0_75"] = int((similarity > 0.75).sum().item())
 
         return result
+
+    def aligned_pairs_above(
+        self,
+        first_segment: int,
+        second_segment: int,
+        threshold: float = 0.75,
+    ) -> list[dict[str, float | int]]:
+        """Return aligned block locations whose cosine similarity exceeds a threshold."""
+        if not 0 <= first_segment < 3 or not 0 <= second_segment < 3:
+            raise ValueError("segment indices must be in the range 0 through 2.")
+        if first_segment == second_segment:
+            raise ValueError("the two segment indices must be different.")
+
+        blocks = self._segment_blocks()
+        normalized = torch.nn.functional.normalize(blocks, dim=2)
+        similarity = (normalized[first_segment] * normalized[second_segment]).sum(dim=1)
+        blocks_per_row = (self.tensor.shape[1] // 3) // self.block_size
+        positions = torch.where(similarity > threshold)[0]
+
+        return [
+            {
+                "row_block": position.item() // blocks_per_row,
+                "column_block": position.item() % blocks_per_row,
+                "cosine_similarity": similarity[position].item(),
+            }
+            for position in positions
+        ]
