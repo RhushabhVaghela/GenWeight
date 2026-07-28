@@ -167,6 +167,52 @@ class QKVSimilarityAnalyzer:
 
         return report
 
+    def same_index_linear_reuse_report(
+        self, source_segment: int = 0, target_segment: int = 1
+    ) -> list[dict[str, float | int]]:
+        """Fit a per-head linear map from source weights to target weights.
+
+        Each relation is ``target ≈ source × A``. ``A`` has ``head_dim²``
+        parameters, compared with ``rows × head_dim`` parameters for a dense
+        target head.
+        """
+        if not 0 <= source_segment < 3 or not 0 <= target_segment < 3:
+            raise ValueError("segment indices must be in the range 0 through 2.")
+        if source_segment == target_segment:
+            raise ValueError("source and target segments must be different.")
+
+        rows, columns = self.tensor.shape
+        segment_width = columns // 3
+        head_count = segment_width // self.block_size
+        segments = self.tensor.reshape(rows, 3, segment_width).permute(1, 0, 2)
+        heads = segments.reshape(3, rows, head_count, self.block_size)
+        heads = heads.permute(0, 2, 1, 3)
+        source_heads = heads[source_segment]
+        target_heads = heads[target_segment]
+        transform_parameters = self.block_size**2
+        target_parameters = rows * self.block_size
+        report = []
+
+        for head_index in range(head_count):
+            source = source_heads[head_index]
+            target = target_heads[head_index]
+            transform = torch.linalg.lstsq(source, target).solution
+            residual = target - source @ transform
+            relative_residual = (
+                torch.linalg.vector_norm(residual) / torch.linalg.vector_norm(target)
+            ).item()
+            report.append(
+                {
+                    "head": head_index,
+                    "relative_residual": relative_residual,
+                    "transform_parameters": transform_parameters,
+                    "target_parameters": target_parameters,
+                    "parameter_ratio": transform_parameters / target_parameters,
+                }
+            )
+
+        return report
+
     def plot_head_similarity(
         self,
         first_segment: int,
