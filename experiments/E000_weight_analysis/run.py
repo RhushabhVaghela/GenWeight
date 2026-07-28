@@ -36,6 +36,7 @@ def main() -> None:
     qkv = QKVSimilarityAnalyzer(weight, block_size=64)
     qkv_similarity_summary = qkv.summary()
     high_qk_pairs = qkv.aligned_pairs_above(0, 1, threshold=0.75)
+    top_qk_head_pairs = qkv.top_head_pairs(0, 1)
 
     print("\n" + "=" * 60)
     print("Weight Statistics")
@@ -100,6 +101,14 @@ def main() -> None:
             f"cosine={pair['cosine_similarity']:.4f}"
         )
 
+    print("\nTop Q/K Head Pairs")
+    for pair in top_qk_head_pairs:
+        print(
+            f"Q head={pair['first_head']:<2} "
+            f"K head={pair['second_head']:<2} "
+            f"cosine={pair['cosine_similarity']:.4f}"
+        )
+
     visualizer = WeightVisualizer(weight)
     visualizer.histogram(
         bins=100,
@@ -119,6 +128,11 @@ def main() -> None:
     blocks.plot_similarity_matrix(
         save_path=result_directory / "block_similarity.png"
     )
+    qkv.plot_head_similarity(
+        0,
+        1,
+        save_path=result_directory / "qk_head_similarity.png",
+    )
 
     result_directory.mkdir(parents=True, exist_ok=True)
     with (result_directory / "summary.json").open("w", encoding="utf-8") as file:
@@ -133,6 +147,7 @@ def main() -> None:
                 "top_block_pairs": top_block_pairs,
                 **qkv_similarity_summary,
                 "high_qk_pairs": high_qk_pairs,
+                "top_qk_head_pairs": top_qk_head_pairs,
             },
             file,
             indent=2,

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from itertools import combinations
+from pathlib import Path
 
+import matplotlib.pyplot as plt
 import torch
 
 
@@ -81,3 +83,63 @@ class QKVSimilarityAnalyzer:
             }
             for position in positions
         ]
+
+    def head_similarity_matrix(
+        self, first_segment: int, second_segment: int
+    ) -> torch.Tensor:
+        """Return cosine similarity between every output head in two Q/K/V segments."""
+        if not 0 <= first_segment < 3 or not 0 <= second_segment < 3:
+            raise ValueError("segment indices must be in the range 0 through 2.")
+
+        rows, columns = self.tensor.shape
+        segment_width = columns // 3
+        head_count = segment_width // self.block_size
+        segments = self.tensor.reshape(rows, 3, segment_width).permute(1, 0, 2)
+        heads = segments.reshape(3, rows, head_count, self.block_size)
+        heads = heads.permute(0, 2, 1, 3).reshape(3, head_count, -1)
+        normalized = torch.nn.functional.normalize(heads, dim=2)
+        return normalized[first_segment] @ normalized[second_segment].T
+
+    def top_head_pairs(
+        self, first_segment: int, second_segment: int, count: int = 10
+    ) -> list[dict[str, float | int]]:
+        """Return the strongest cross-segment head similarities."""
+        if count < 1:
+            raise ValueError("count must be at least 1.")
+
+        similarity = self.head_similarity_matrix(first_segment, second_segment)
+        pair_count = min(count, similarity.numel())
+        scores, positions = torch.topk(similarity.flatten(), k=pair_count)
+        head_count = similarity.shape[1]
+        return [
+            {
+                "first_head": position.item() // head_count,
+                "second_head": position.item() % head_count,
+                "cosine_similarity": score.item(),
+            }
+            for score, position in zip(scores, positions)
+        ]
+
+    def plot_head_similarity(
+        self,
+        first_segment: int,
+        second_segment: int,
+        save_path: str | Path | None = None,
+    ) -> None:
+        """Save a heatmap of cross-segment output-head similarity."""
+        labels = ("Q", "K", "V")
+        similarity = self.head_similarity_matrix(first_segment, second_segment)
+        figure, axis = plt.subplots(figsize=(8, 6))
+        image = axis.imshow(similarity.numpy(), cmap="coolwarm", vmin=-1, vmax=1)
+        figure.colorbar(image, ax=axis, label="Cosine similarity")
+        axis.set_title(f"{labels[first_segment]}–{labels[second_segment]} Head Similarity")
+        axis.set_xlabel(f"{labels[second_segment]} head")
+        axis.set_ylabel(f"{labels[first_segment]} head")
+        figure.tight_layout()
+
+        if save_path is not None:
+            output_path = Path(save_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            figure.savefig(output_path, dpi=300)
+
+        plt.close(figure)
