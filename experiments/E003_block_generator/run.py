@@ -12,10 +12,11 @@ PARAMETER_NAME = "h.0.attn.c_attn.weight"
 BLOCK_SIZE = 64
 LATENT_DIM = 32
 HIDDEN_DIM = 64
-TRAINING_STEPS = 500
+TRAINING_STEPS = 2_000
 BATCH_SIZE = 16
 LEARNING_RATE = 1e-3
 SEED = 0
+EVALUATION_INTERVAL = 250
 
 
 def extract_blocks(matrix: torch.Tensor, block_size: int) -> torch.Tensor:
@@ -25,6 +26,20 @@ def extract_blocks(matrix: torch.Tensor, block_size: int) -> torch.Tensor:
     column_blocks = columns // block_size
     blocks = matrix.reshape(row_blocks, block_size, column_blocks, block_size)
     return blocks.permute(0, 2, 1, 3).reshape(-1, block_size * block_size)
+
+
+def reconstruction_error(
+    generator: BlockWeightGenerator, targets: torch.Tensor
+) -> float:
+    """Return full-block relative Frobenius reconstruction error."""
+    generator.eval()
+    with torch.no_grad():
+        indices = torch.arange(len(targets), device=targets.device)
+        reconstruction = generator(indices)
+        return (
+            torch.linalg.vector_norm(reconstruction - targets)
+            / torch.linalg.vector_norm(targets)
+        ).item()
 
 
 def main() -> None:
@@ -45,6 +60,7 @@ def main() -> None:
     ).to(device)
     optimizer = torch.optim.AdamW(generator.parameters(), lr=LEARNING_RATE)
     loss_function = nn.MSELoss()
+    reconstruction_history = []
 
     print(f"Training block generator on {device}.")
     for step in range(1, TRAINING_STEPS + 1):
@@ -60,14 +76,13 @@ def main() -> None:
         if step == 1 or step % 100 == 0:
             print(f"step={step:4} mse={loss.item():.8f}")
 
-    generator.eval()
-    with torch.no_grad():
-        all_indices = torch.arange(len(targets), device=device)
-        reconstruction = generator(all_indices)
-        relative_error = (
-            torch.linalg.vector_norm(reconstruction - targets)
-            / torch.linalg.vector_norm(targets)
-        ).item()
+        if step % EVALUATION_INTERVAL == 0:
+            error = reconstruction_error(generator, targets)
+            reconstruction_history.append({"step": step, "relative_error": error})
+            print(f"step={step:4} full_relative_error={error:.6f}")
+            generator.train()
+
+    relative_error = reconstruction_error(generator, targets)
 
     parameter_count = sum(parameter.numel() for parameter in generator.parameters())
     summary = {
@@ -79,10 +94,12 @@ def main() -> None:
         "latent_dim": LATENT_DIM,
         "hidden_dim": HIDDEN_DIM,
         "training_steps": TRAINING_STEPS,
+        "evaluation_interval": EVALUATION_INTERVAL,
         "generator_parameters": parameter_count,
         "dense_parameters": matrix.numel(),
         "parameter_ratio": parameter_count / matrix.numel(),
         "relative_frobenius_error": relative_error,
+        "reconstruction_history": reconstruction_history,
     }
 
     print("\nBlock Generator Summary")
