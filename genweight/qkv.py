@@ -236,3 +236,69 @@ class QKVSimilarityAnalyzer:
             figure.savefig(output_path, dpi=300)
 
         plt.close(figure)
+
+    def qk_residual_compression_report(
+        self, residual_ranks: list[int], similarity_threshold: float = 0.75
+    ) -> dict[str, object]:
+        """Estimate storage and error for regenerating selected K heads from Q heads.
+
+        A selected key head is represented as ``K ≈ Q × A + U × V``. The
+        transform ``A`` is always stored; ``U × V`` is a rank-limited residual.
+        Query heads remain stored normally and are reused by the decoder.
+        """
+        rows, columns = self.tensor.shape
+        segment_width = columns // 3
+        head_count = segment_width // self.block_size
+        segments = self.tensor.reshape(rows, 3, segment_width).permute(1, 0, 2)
+        q_heads = segments[0].reshape(rows, head_count, self.block_size).permute(1, 0, 2)
+        k_heads = segments[1].reshape(rows, head_count, self.block_size).permute(1, 0, 2)
+
+        selected_heads = []
+        residual_singular_values = []
+        for head_index in range(head_count):
+            query = q_heads[head_index]
+            key = k_heads[head_index]
+            cosine = (
+                torch.sum(query * key)
+                / (torch.linalg.vector_norm(query) * torch.linalg.vector_norm(key))
+            ).item()
+            if cosine >= similarity_threshold:
+                transform = torch.linalg.lstsq(query, key).solution
+                residual = key - query @ transform
+                selected_heads.append(head_index)
+                residual_singular_values.append(torch.linalg.svdvals(residual))
+
+        if not selected_heads:
+            raise ValueError("no Q/K heads met the requested similarity threshold.")
+
+        total_squared_norm = self.tensor.square().sum()
+        dense_parameters = self.tensor.numel()
+        dense_key_head_parameters = rows * self.block_size
+        results = []
+
+        for rank in sorted(set(residual_ranks)):
+            if not 0 <= rank <= self.block_size:
+                raise ValueError(f"residual rank must be between 0 and {self.block_size}.")
+
+            residual_squared_norm = sum(
+                singular_values[rank:].square().sum()
+                for singular_values in residual_singular_values
+            )
+            generated_parameters_per_head = self.block_size**2 + rank * (
+                rows + self.block_size
+            )
+            stored_parameters = dense_parameters - len(selected_heads) * dense_key_head_parameters
+            stored_parameters += len(selected_heads) * generated_parameters_per_head
+            results.append(
+                {
+                    "residual_rank": rank,
+                    "relative_frobenius_error": torch.sqrt(
+                        residual_squared_norm / total_squared_norm
+                    ).item(),
+                    "stored_parameters": stored_parameters,
+                    "parameter_ratio": stored_parameters / dense_parameters,
+                    "compression_ratio": dense_parameters / stored_parameters,
+                }
+            )
+
+        return {"selected_qk_heads": selected_heads, "results": results}
