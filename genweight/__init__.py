@@ -12,8 +12,13 @@ from .low_rank import LowRankAnalyzer
 from .multi_layer import MultiLayerAnalyzer
 from .quantization import (
     QuantizationResult,
-    quantize_matrix,
-    run_quantization_suite,
+    quantize_int8,
+    quantize_int4,
+    quantize_int4_group,
+    quantize_fp8,
+    quantize_fp4,
+    quantize_matrix_smart,
+    run_full_quantization_suite,
 )
 from .qkv import QKVSimilarityAnalyzer
 from .similarity import BlockSimilarityAnalyzer
