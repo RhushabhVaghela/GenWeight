@@ -8,6 +8,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def make_serializable(obj):
+    """Recursively convert tensors to lists for JSON serialization."""
+    if isinstance(obj, torch.Tensor):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: make_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [make_serializable(v) for v in obj]
+    elif isinstance(obj, (int, float, str, bool, type(None))):
+        return obj
+    else:
+        return str(obj)
+
+
 def _get_weight_format(weight: torch.Tensor) -> tuple[torch.Tensor, bool]:
     """
     Detect GPT-2 Conv1D weight format and transpose if needed.
@@ -52,7 +66,7 @@ class QuantizationResult:
 
 
 # ============================================================
-# EXISTING BASIC QUANTIZATION FUNCTIONS (kept for compatibility)
+# BASIC QUANTIZATION FUNCTIONS
 # ============================================================
 
 def quantize_int8(tensor: torch.Tensor, scale: float | None = None) -> tuple[torch.Tensor, float]:
@@ -184,55 +198,37 @@ def quantize_gptq_int4(
     GPTQ key insight: Not all weights are equally important.
     Uses diagonal Hessian (second derivative of loss w.r.t. weights) as importance metric.
     Weights with higher Hessian diagonal are quantized more carefully.
-
-    Args:
-        weight: 2D weight matrix [out_features, in_features]
-        hessian_diag: Precomputed diagonal Hessian [out_features, in_features] or [in_features]
-        group_size: Block size for quantization
-        dampening: Dampening factor for numerical stability
-
-    Returns:
-        dequantized weight, metadata dict
     """
     weight, was_transposed = _get_weight_format(weight)
     device = weight.device
     out_features, in_features = weight.shape
     weight = weight.float()
 
-    # If no Hessian provided, use ones (reduces to naive INT4)
     if hessian_diag is None:
         hessian_diag = torch.ones(in_features, device=device)
     elif hessian_diag.dim() == 2:
-        # Average over output features if per-output Hessian
         hessian_diag = hessian_diag.mean(dim=0)
 
-    # Process in groups along input dimension
     num_groups = (in_features + group_size - 1) // group_size
     dequantized = torch.zeros_like(weight)
     scales = torch.zeros(num_groups, device=device)
-    quantized_groups = []
 
     for g in range(num_groups):
         start = g * group_size
         end = min(start + group_size, in_features)
-        group_weight = weight[:, start:end]  # [out_features, group_size]
-        group_hessian = hessian_diag[start:end]  # [group_size]
+        group_weight = weight[:, start:end]
+        group_hessian = hessian_diag[start:end]
 
-        # GPTQ: compute importance-weighted scale
-        # Scale inversely proportional to sqrt(Hessian) to protect important weights
         importance = 1.0 / torch.sqrt(group_hessian + dampening)
-        importance = importance / importance.mean()  # Normalize
+        importance = importance / importance.mean()
 
-        # Weighted max for scale computation
         weighted_weight = group_weight * importance.unsqueeze(0)
         scale = weighted_weight.abs().max().item() / 7.0
         scale = max(scale, 1e-8)
         scales[g] = scale
 
-        # Quantize
         quantized = (group_weight / scale).round().clamp(-8, 7)
         dequantized[:, start:end] = quantized * scale
-        quantized_groups.append(quantized)
 
     dequantized = _restore_weight_format(dequantized, was_transposed)
 
@@ -255,15 +251,6 @@ def quantize_awq_int4(
 
     AWQ key insight: Protect weights that correspond to large activations.
     Importance = activation_scale^2 (since error propagates as scale^2).
-
-    Args:
-        weight: 2D weight matrix [out_features, in_features]
-        activation_scales: Per-input-channel activation scales [in_features]
-                          (obtained from calibration data)
-        group_size: Quantization group size
-
-    Returns:
-        dequantized weight, metadata dict
     """
     weight, was_transposed = _get_weight_format(weight)
     device = weight.device
@@ -271,7 +258,6 @@ def quantize_awq_int4(
     weight = weight.float()
 
     if activation_scales is None:
-        # Fallback: use weight magnitude as proxy
         activation_scales = weight.abs().mean(dim=0)
 
     num_groups = (in_features + group_size - 1) // group_size
@@ -284,8 +270,6 @@ def quantize_awq_int4(
         group_weight = weight[:, start:end]
         group_act_scales = activation_scales[start:end]
 
-        # AWQ: scale inversely to activation magnitude
-        # Larger activation -> smaller scale -> finer quantization
         importance = 1.0 / (group_act_scales + 1e-8)
         importance = importance / importance.mean()
 
@@ -318,15 +302,6 @@ def quantize_smoothquant(
 
     Key idea: W * x = (W * s) * (x / s) where s = max(x)^alpha
     This makes activations easier to quantize at cost of weight quantization.
-
-    Args:
-        weight: [out_features, in_features]
-        activation_scales: Per-channel activation max [in_features]
-        alpha: Migration strength (0 = no migration, 1 = full migration)
-        scheme: Target quantization for weights ("int8" or "int4")
-
-    Returns:
-        smoothed_weight, smoothed_activation_scales, metadata
     """
     weight, was_transposed = _get_weight_format(weight)
     device = weight.device
@@ -334,7 +309,6 @@ def quantize_smoothquant(
     weight = weight.float()
 
     if activation_scales is None:
-        # Proxy: use row norms of weight
         activation_scales = weight.abs().mean(dim=0)
 
     # Smooth factor: s = max(act)^alpha / max(w)^(1-alpha)
@@ -342,7 +316,6 @@ def quantize_smoothquant(
     smooth_scales = activation_scales ** alpha
     smooth_scales = smooth_scales / smooth_scales.mean()
 
-    # Migrate scale to weights
     smoothed_weight = weight * smooth_scales.unsqueeze(0)
     smoothed_act_scales = activation_scales / smooth_scales
 
@@ -379,16 +352,6 @@ def quantize_autoround_int4(
 
     Instead of naive round-to-nearest, learn optimal integer assignments
     that minimize reconstruction error weighted by Hessian importance.
-
-    Args:
-        weight: 2D weight matrix
-        hessian_diag: Diagonal Hessian for importance weighting
-        group_size: Quantization group size
-        num_iterations: Optimization steps
-        lr: Learning rate for scale/offset optimization
-
-    Returns:
-        dequantized weight, metadata
     """
     weight, was_transposed = _get_weight_format(weight)
     device = weight.device
@@ -407,26 +370,22 @@ def quantize_autoround_int4(
     for g in range(num_groups):
         start = g * group_size
         end = min(start + group_size, in_features)
-        group_weight = weight[:, start:end]  # [out, g]
+        group_weight = weight[:, start:end]
         group_hessian = hessian_diag[start:end]
 
-        # Initialize scale with weighted max
         importance = 1.0 / torch.sqrt(group_hessian + 0.01)
         importance = importance / importance.mean()
         weighted = group_weight * importance.unsqueeze(0)
         init_scale = weighted.abs().max().item() / 7.0
         init_scale = max(init_scale, 1e-8)
 
-        # Learnable scale
         scale = nn.Parameter(torch.tensor(init_scale, device=device))
         optimizer = torch.optim.Adam([scale], lr=lr)
 
         for _ in range(num_iterations):
             optimizer.zero_grad()
-            # Quantize with current scale
             quantized = (group_weight / scale).round().clamp(-8, 7)
             dequant = quantized * scale
-            # Weighted reconstruction error
             error = (dequant - group_weight) * importance.unsqueeze(0)
             loss = (error ** 2).sum()
             loss.backward()
@@ -458,11 +417,8 @@ def quantize_nf4(
 
     NF4 places 16 quantization levels according to the normal distribution
     where LLM weights typically concentrate (near 0).
-
-    Levels are computed once and hardcoded for standard normal distribution.
     """
     # NF4 levels for standard normal distribution N(0,1)
-    # These are the optimal 16 values from Dettmers et al. 2023
     NF4_LEVELS = torch.tensor([
         -1.0, -0.6961928009986877, -0.5250730514526367, -0.39491748809814453,
         -0.28444138169288635, -0.18477343022823334, -0.09105003625154495,
@@ -481,12 +437,11 @@ def quantize_nf4(
     grouped = padded.reshape(num_blocks, block_size)
 
     # Normalize each block to N(0,1) scale
-    scales = grouped.abs().mean(dim=1) * 1.25  # Empirical scale factor
+    scales = grouped.abs().mean(dim=1) * 1.25
     scales = scales.clamp_min(1e-8)
     normalized = grouped / scales.unsqueeze(1)
 
     # Quantize to nearest NF4 level
-    # Use broadcasting: [num_blocks, block_size, 1] - [16] -> [num_blocks, block_size, 16]
     diff = normalized.unsqueeze(-1) - NF4_LEVELS.unsqueeze(0).unsqueeze(0)
     indices = diff.abs().argmin(dim=-1)
     quantized = NF4_LEVELS[indices]
@@ -516,9 +471,6 @@ def quantize_gguf_q4_k(
     - 4-bit values per weight
     - Per-block scale (16-bit float)
     - Per-block min/offset for better range utilization
-    - Super-block structure for efficient packing
-
-    This is a simplified functional version.
     """
     weight, was_transposed = _get_weight_format(weight)
     original_shape = weight.shape
@@ -528,7 +480,6 @@ def quantize_gguf_q4_k(
     padded = torch.nn.functional.pad(flat, (0, padded_len - flat.numel()))
     grouped = padded.reshape(num_blocks, block_size)
 
-    # Q4_K uses 4-bit values: 0-15 mapped to symmetric range with offset
     scales = torch.zeros(num_blocks, device=weight.device)
     mins = torch.zeros(num_blocks, device=weight.device)
     dequantized = torch.zeros_like(grouped)
@@ -538,13 +489,10 @@ def quantize_gguf_q4_k(
         block_min = block.min()
         block_max = block.max()
 
-        # Use symmetric scale around midpoint for better utilization
         scale = (block_max - block_min) / 15.0
         scale = max(scale, 1e-8)
 
-        # Quantize to 0-15
         quantized = ((block - block_min) / scale).round().clamp(0, 15).to(torch.uint8)
-        # Dequantize
         dequantized[b] = quantized.float() * scale + block_min
 
         scales[b] = scale
@@ -574,8 +522,6 @@ def quantize_nvfp4(
     1. Ultra-fine groups (16 weights share one scale)
     2. Scale stored in higher precision (FP8 or FP16)
     3. 4-bit values are floating-point (1 sign, 2 exp, 1 mantissa)
-
-    This is a functional simulation of the format.
     """
     weight, was_transposed = _get_weight_format(weight)
     original_shape = weight.shape
@@ -586,7 +532,6 @@ def quantize_nvfp4(
     grouped = padded.reshape(num_groups, group_size)
 
     # NVFP4 representable values (E2M1 format: 1 sign, 2 exponent, 1 mantissa)
-    # Values: 0, ±0.5, ±1.0, ±1.5, ±2.0, ±3.0, ±4.0, ±6.0
     NVFP4_VALUES = torch.tensor([
         0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
         -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0
@@ -598,15 +543,13 @@ def quantize_nvfp4(
     for g in range(num_groups):
         group = grouped[g]
 
-        # Find optimal scale for this group
         max_abs = group.abs().max()
         if max_abs > 0:
-            scale = max_abs / 6.0  # 6.0 is max NVFP4 value
+            scale = max_abs / 6.0
         else:
             scale = 1.0
         scales[g] = scale
 
-        # Normalize and quantize to nearest NVFP4 value
         normalized = group / scale
         diff = normalized.unsqueeze(-1) - NVFP4_VALUES.unsqueeze(0)
         indices = diff.abs().argmin(dim=-1)
@@ -623,37 +566,6 @@ def quantize_nvfp4(
         "scale_precision": scale_precision,
     }
     return dequantized, metadata
-
-
-# ============================================================
-# METRICS COMPUTATION
-# ============================================================
-
-def compute_metrics(
-    original: torch.Tensor,
-    reconstructed: torch.Tensor,
-    original_bits: int = 32,
-    effective_bits: int = 8,
-) -> QuantizationResult:
-    """Compute quality metrics for quantization."""
-    error = reconstructed - original
-    fro_norm_original = torch.linalg.matrix_norm(original).item()
-    fro_norm_error = torch.linalg.matrix_norm(error).item()
-    relative_fro_error = fro_norm_error / max(fro_norm_original, 1e-12)
-    max_abs_error = error.abs().max().item()
-
-    # SNR in dB
-    signal_power = (original ** 2).mean().item()
-    noise_power = (error ** 2).mean().item()
-    snr_db = 10 * torch.log10(torch.tensor(signal_power / max(noise_power, 1e-12))).item()
-
-    return QuantizationResult(
-        scheme="",
-        relative_frobenius_error=relative_fro_error,
-        max_absolute_error=max_abs_error,
-        snr_db=snr_db,
-        compression_ratio=float(original_bits) / effective_bits,
-    )
 
 
 # ============================================================
@@ -689,11 +601,8 @@ def quantize_matrix_basic(
     scheme: str,
     **kwargs,
 ) -> tuple[torch.Tensor, dict]:
-    """Quantize a matrix with basic schemes (delegates to old implementation)."""
-    # This is a placeholder - in practice use quantize_matrix_smart
-    # which handles all schemes uniformly
+    """Quantize a matrix with basic schemes."""
     if scheme in BASIC_QUANTIZATION_SCHEMES:
-        # Call appropriate basic function
         if scheme == "int8":
             dequant, scale = quantize_int8(tensor)
             metrics = compute_metrics(tensor, dequant)
@@ -744,7 +653,7 @@ def quantize_matrix_basic(
                 "snr_db": metrics.snr_db,
                 "compression_ratio": metrics.compression_ratio,
             }
-    
+
     raise ValueError(f"Unknown basic scheme: {scheme}")
 
 
@@ -757,7 +666,6 @@ def quantize_matrix_smart(
     if scheme in BASIC_QUANTIZATION_SCHEMES:
         return quantize_matrix_basic(tensor, scheme, **kwargs)
 
-    # Smart quantization schemes
     if scheme == "gptq_int4":
         hessian = kwargs.get("hessian_diag", None)
         dequant, meta = quantize_gptq_int4(tensor, hessian_diag=hessian,
@@ -785,7 +693,6 @@ def quantize_matrix_smart(
     else:
         raise ValueError(f"Unknown quantization scheme: {scheme}")
 
-    # Compute metrics
     metrics = compute_metrics(tensor, dequant)
     meta.update({
         "relative_frobenius_error": metrics.relative_frobenius_error,

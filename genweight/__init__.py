@@ -26,7 +26,7 @@ from .quantization import (
     quantize_nvfp4,
     quantize_matrix_smart,
     run_full_quantization_suite,
-    compute_metrics,
+    make_serializable,
 )
 from .qkv import QKVSimilarityAnalyzer
 from .similarity import BlockSimilarityAnalyzer
