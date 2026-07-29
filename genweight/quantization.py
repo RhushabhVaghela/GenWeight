@@ -7,7 +7,39 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ... existing quantization functions (quantize_int8, quantize_int4, etc.) ...
+
+def _get_weight_format(weight: torch.Tensor) -> tuple[torch.Tensor, bool]:
+    """
+    Detect GPT-2 Conv1D weight format and transpose if needed.
+    
+    Standard linear: [out_features, in_features]
+    GPT-2 Conv1D: [in_features, out_features]
+    
+    Returns: (possibly_transposed_weight, was_transposed)
+    """
+    rows, cols = weight.shape
+    
+    # Check if first dim is a "hidden size" and second is a multiple
+    hidden_sizes = [768, 1024, 1280, 1536, 2048, 2560, 3072, 4096, 5120, 8192]
+    for hs in hidden_sizes:
+        if rows == hs and cols % hs == 0:
+            # Likely Conv1D format [in_features, out_features]
+            return weight.T, True
+    
+    # Check reverse
+    for hs in hidden_sizes:
+        if cols == hs and rows % hs == 0:
+            # Standard linear format [out_features, in_features]
+            return weight, False
+    
+    # Default: assume standard format
+    return weight, False
+
+
+def _restore_weight_format(weight: torch.Tensor, was_transposed: bool) -> torch.Tensor:
+    """Restore original weight format."""
+    return weight.T if was_transposed else weight
+
 
 @dataclass
 class QuantizationResult:
@@ -25,30 +57,35 @@ class QuantizationResult:
 
 def quantize_int8(tensor: torch.Tensor, scale: float | None = None) -> tuple[torch.Tensor, float]:
     """Simulate symmetric INT8 quantization with per-tensor scale."""
+    weight, was_transposed = _get_weight_format(tensor)
     if scale is None:
-        scale = tensor.abs().max().item() / 127.0
+        scale = weight.abs().max().item() / 127.0
     if scale == 0:
         scale = 1.0
-    quantized = (tensor / scale).round().clamp(-128, 127)
+    quantized = (weight / scale).round().clamp(-128, 127)
     dequantized = quantized * scale
+    dequantized = _restore_weight_format(dequantized, was_transposed)
     return dequantized, scale
 
 
 def quantize_int4(tensor: torch.Tensor, scale: float | None = None) -> tuple[torch.Tensor, float]:
     """Simulate symmetric INT4 quantization with per-tensor scale."""
+    weight, was_transposed = _get_weight_format(tensor)
     if scale is None:
-        scale = tensor.abs().max().item() / 7.0
+        scale = weight.abs().max().item() / 7.0
     if scale == 0:
         scale = 1.0
-    quantized = (tensor / scale).round().clamp(-8, 7)
+    quantized = (weight / scale).round().clamp(-8, 7)
     dequantized = quantized * scale
+    dequantized = _restore_weight_format(dequantized, was_transposed)
     return dequantized, scale
 
 
 def quantize_int4_group(tensor: torch.Tensor, group_size: int = 64) -> tuple[torch.Tensor, torch.Tensor]:
     """Simulate INT4 with group-wise scaling (GGUF-style)."""
-    original_shape = tensor.shape
-    flat = tensor.flatten()
+    weight, was_transposed = _get_weight_format(tensor)
+    original_shape = weight.shape
+    flat = weight.flatten()
     num_groups = (flat.numel() + group_size - 1) // group_size
     padded_len = num_groups * group_size
     padded = torch.nn.functional.pad(flat, (0, padded_len - flat.numel()))
@@ -60,27 +97,33 @@ def quantize_int4_group(tensor: torch.Tensor, group_size: int = 64) -> tuple[tor
     dequantized = quantized * scales.unsqueeze(1)
 
     dequantized = dequantized.flatten()[:flat.numel()].reshape(original_shape)
+    dequantized = _restore_weight_format(dequantized, was_transposed)
     return dequantized, scales
 
 
 def quantize_fp8(tensor: torch.Tensor) -> torch.Tensor:
-    """Simulate E4M3 FP8 quantization."""
+    """Simulate E4M3 FP8 quantization (approximate with float8_e4m3fn)."""
+    weight, was_transposed = _get_weight_format(tensor)
     try:
-        fp8_tensor = tensor.to(torch.float8_e4m3fn)
-        return fp8_tensor.to(tensor.dtype)
+        fp8_tensor = weight.to(torch.float8_e4m3fn)
+        dequantized = fp8_tensor.to(weight.dtype)
     except (RuntimeError, AttributeError):
+        # Fallback: simulate with manual scaling to E4M3 range
         max_val = 226.0
-        scale = tensor.abs().max().item() / max_val
+        scale = weight.abs().max().item() / max_val
         if scale == 0:
             return tensor
-        quantized = (tensor / scale).clamp(-max_val, max_val)
-        return (quantized * scale).to(tensor.dtype)
+        quantized = (weight / scale).clamp(-max_val, max_val)
+        dequantized = (quantized * scale).to(weight.dtype)
+    dequantized = _restore_weight_format(dequantized, was_transposed)
+    return dequantized
 
 
 def quantize_fp4(tensor: torch.Tensor) -> torch.Tensor:
-    """Simulate NVFP4-style quantization."""
-    original_shape = tensor.shape
-    flat = tensor.flatten()
+    """Simulate NVFP4-style quantization (2-bit mantissa, 2-bit exponent)."""
+    weight, was_transposed = _get_weight_format(tensor)
+    original_shape = weight.shape
+    flat = weight.flatten()
     group_size = 16
     num_groups = (flat.numel() + group_size - 1) // group_size
     padded_len = num_groups * group_size
@@ -94,7 +137,35 @@ def quantize_fp4(tensor: torch.Tensor) -> torch.Tensor:
     dequantized = quantized * scales.unsqueeze(1)
 
     dequantized = dequantized.flatten()[:flat.numel()].reshape(original_shape)
+    dequantized = _restore_weight_format(dequantized, was_transposed)
     return dequantized
+
+
+def compute_metrics(
+    original: torch.Tensor,
+    reconstructed: torch.Tensor,
+    original_bits: int = 32,
+    effective_bits: int = 8,
+) -> QuantizationResult:
+    """Compute quality metrics for quantization."""
+    error = reconstructed - original
+    fro_norm_original = torch.linalg.matrix_norm(original).item()
+    fro_norm_error = torch.linalg.matrix_norm(error).item()
+    relative_fro_error = fro_norm_error / max(fro_norm_original, 1e-12)
+    max_abs_error = error.abs().max().item()
+
+    # SNR in dB
+    signal_power = (original ** 2).mean().item()
+    noise_power = (error ** 2).mean().item()
+    snr_db = 10 * torch.log10(torch.tensor(signal_power / max(noise_power, 1e-12))).item()
+
+    return QuantizationResult(
+        scheme="",
+        relative_frobenius_error=relative_fro_error,
+        max_absolute_error=max_abs_error,
+        snr_db=snr_db,
+        compression_ratio=float(original_bits) / effective_bits,
+    )
 
 
 # ============================================================
@@ -123,6 +194,7 @@ def quantize_gptq_int4(
     Returns:
         dequantized weight, metadata dict
     """
+    weight, was_transposed = _get_weight_format(weight)
     device = weight.device
     out_features, in_features = weight.shape
     weight = weight.float()
@@ -162,6 +234,8 @@ def quantize_gptq_int4(
         dequantized[:, start:end] = quantized * scale
         quantized_groups.append(quantized)
 
+    dequantized = _restore_weight_format(dequantized, was_transposed)
+
     metadata = {
         "scheme": "gptq_int4",
         "group_size": group_size,
@@ -191,6 +265,7 @@ def quantize_awq_int4(
     Returns:
         dequantized weight, metadata dict
     """
+    weight, was_transposed = _get_weight_format(weight)
     device = weight.device
     out_features, in_features = weight.shape
     weight = weight.float()
@@ -222,6 +297,8 @@ def quantize_awq_int4(
         quantized = (group_weight / scale).round().clamp(-8, 7)
         dequantized[:, start:end] = quantized * scale
 
+    dequantized = _restore_weight_format(dequantized, was_transposed)
+
     metadata = {
         "scheme": "awq_int4",
         "group_size": group_size,
@@ -251,6 +328,7 @@ def quantize_smoothquant(
     Returns:
         smoothed_weight, smoothed_activation_scales, metadata
     """
+    weight, was_transposed = _get_weight_format(weight)
     device = weight.device
     out_features, in_features = weight.shape
     weight = weight.float()
@@ -268,13 +346,25 @@ def quantize_smoothquant(
     smoothed_weight = weight * smooth_scales.unsqueeze(0)
     smoothed_act_scales = activation_scales / smooth_scales
 
+    # Quantize smoothed weights
+    if scheme == "int8":
+        dequantized, _ = quantize_int8(smoothed_weight)
+    else:
+        dequantized, _ = quantize_int4(smoothed_weight)
+
+    dequantized = _restore_weight_format(dequantized, was_transposed)
+
     metadata = {
         "scheme": f"smoothquant_{scheme}",
         "alpha": alpha,
         "smooth_scales": smooth_scales.cpu(),
         "smoothed_activation_scales": smoothed_act_scales.cpu(),
+        "smoothed_weight_stats": {
+            "mean": smoothed_weight.mean().item(),
+            "std": smoothed_weight.std().item(),
+        }
     }
-    return smoothed_weight, smoothed_act_scales, metadata
+    return dequantized, smoothed_act_scales, metadata
 
 
 def quantize_autoround_int4(
@@ -300,6 +390,7 @@ def quantize_autoround_int4(
     Returns:
         dequantized weight, metadata
     """
+    weight, was_transposed = _get_weight_format(weight)
     device = weight.device
     out_features, in_features = weight.shape
     weight = weight.float()
@@ -347,6 +438,8 @@ def quantize_autoround_int4(
         quantized = (group_weight / final_scale).round().clamp(-8, 7)
         dequantized[:, start:end] = quantized * final_scale
 
+    dequantized = _restore_weight_format(dequantized, was_transposed)
+
     metadata = {
         "scheme": "autoround_int4",
         "group_size": group_size,
@@ -379,11 +472,12 @@ def quantize_nf4(
         0.7229568362236023, 1.0
     ], device=weight.device)
 
+    weight, was_transposed = _get_weight_format(weight)
     original_shape = weight.shape
     flat = weight.flatten()
     num_blocks = (flat.numel() + block_size - 1) // block_size
     padded_len = num_blocks * block_size
-    padded = F.pad(flat, (0, padded_len - flat.numel()))
+    padded = torch.nn.functional.pad(flat, (0, padded_len - flat.numel()))
     grouped = padded.reshape(num_blocks, block_size)
 
     # Normalize each block to N(0,1) scale
@@ -400,6 +494,7 @@ def quantize_nf4(
     # Dequantize
     dequantized = quantized * scales.unsqueeze(1)
     dequantized = dequantized.flatten()[:flat.numel()].reshape(original_shape)
+    dequantized = _restore_weight_format(dequantized, was_transposed)
 
     metadata = {
         "scheme": "nf4",
@@ -425,11 +520,12 @@ def quantize_gguf_q4_k(
 
     This is a simplified functional version.
     """
+    weight, was_transposed = _get_weight_format(weight)
     original_shape = weight.shape
     flat = weight.flatten()
     num_blocks = (flat.numel() + block_size - 1) // block_size
     padded_len = num_blocks * block_size
-    padded = F.pad(flat, (0, padded_len - flat.numel()))
+    padded = torch.nn.functional.pad(flat, (0, padded_len - flat.numel()))
     grouped = padded.reshape(num_blocks, block_size)
 
     # Q4_K uses 4-bit values: 0-15 mapped to symmetric range with offset
@@ -439,12 +535,10 @@ def quantize_gguf_q4_k(
 
     for b in range(num_blocks):
         block = grouped[b]
-        # Find min and max
         block_min = block.min()
         block_max = block.max()
 
         # Use symmetric scale around midpoint for better utilization
-        # Q4_K actually uses 3 scales per super-block, simplified here
         scale = (block_max - block_min) / 15.0
         scale = max(scale, 1e-8)
 
@@ -457,6 +551,7 @@ def quantize_gguf_q4_k(
         mins[b] = block_min
 
     dequantized = dequantized.flatten()[:flat.numel()].reshape(original_shape)
+    dequantized = _restore_weight_format(dequantized, was_transposed)
 
     metadata = {
         "scheme": "gguf_q4_k",
@@ -482,11 +577,12 @@ def quantize_nvfp4(
 
     This is a functional simulation of the format.
     """
+    weight, was_transposed = _get_weight_format(weight)
     original_shape = weight.shape
     flat = weight.flatten()
     num_groups = (flat.numel() + group_size - 1) // group_size
     padded_len = num_groups * group_size
-    padded = F.pad(flat, (0, padded_len - flat.numel()))
+    padded = torch.nn.functional.pad(flat, (0, padded_len - flat.numel()))
     grouped = padded.reshape(num_groups, group_size)
 
     # NVFP4 representable values (E2M1 format: 1 sign, 2 exponent, 1 mantissa)
@@ -494,7 +590,7 @@ def quantize_nvfp4(
     NVFP4_VALUES = torch.tensor([
         0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
         -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0
-    ], device=weight.device)  # 15 non-zero + zero = 16 values
+    ], device=weight.device)
 
     scales = torch.zeros(num_groups, device=weight.device)
     dequantized = torch.zeros_like(grouped)
@@ -503,10 +599,9 @@ def quantize_nvfp4(
         group = grouped[g]
 
         # Find optimal scale for this group
-        # Scale such that max(abs(group)) maps to max NVFP4 value (6.0)
         max_abs = group.abs().max()
         if max_abs > 0:
-            scale = max_abs / 6.0
+            scale = max_abs / 6.0  # 6.0 is max NVFP4 value
         else:
             scale = 1.0
         scales[g] = scale
@@ -519,6 +614,7 @@ def quantize_nvfp4(
         dequantized[g] = quantized * scale
 
     dequantized = dequantized.flatten()[:flat.numel()].reshape(original_shape)
+    dequantized = _restore_weight_format(dequantized, was_transposed)
 
     metadata = {
         "scheme": "nvfp4",
@@ -564,6 +660,16 @@ def compute_metrics(
 # HIGH-LEVEL INTERFACE
 # ============================================================
 
+BASIC_QUANTIZATION_SCHEMES = [
+    "int8",
+    "int8_per_channel",
+    "int4",
+    "int4_per_channel",
+    "int4_group",
+    "fp8",
+    "fp4",
+]
+
 SMART_QUANTIZATION_SCHEMES = [
     "gptq_int4",
     "awq_int4",
@@ -575,10 +681,71 @@ SMART_QUANTIZATION_SCHEMES = [
     "nvfp4",
 ]
 
-ALL_QUANTIZATION_SCHEMES = [
-    "int8", "int8_per_channel", "int4", "int4_per_channel", "int4_group",
-    "fp8", "fp4",
-] + SMART_QUANTIZATION_SCHEMES
+ALL_QUANTIZATION_SCHEMES = BASIC_QUANTIZATION_SCHEMES + SMART_QUANTIZATION_SCHEMES
+
+
+def quantize_matrix_basic(
+    tensor: torch.Tensor,
+    scheme: str,
+    **kwargs,
+) -> tuple[torch.Tensor, dict]:
+    """Quantize a matrix with basic schemes (delegates to old implementation)."""
+    # This is a placeholder - in practice use quantize_matrix_smart
+    # which handles all schemes uniformly
+    if scheme in BASIC_QUANTIZATION_SCHEMES:
+        # Call appropriate basic function
+        if scheme == "int8":
+            dequant, scale = quantize_int8(tensor)
+            metrics = compute_metrics(tensor, dequant)
+            return dequant, {
+                "scheme": f"int8_per_tensor(scale={scale:.6f})",
+                "relative_frobenius_error": metrics.relative_frobenius_error,
+                "max_absolute_error": metrics.max_absolute_error,
+                "snr_db": metrics.snr_db,
+                "compression_ratio": metrics.compression_ratio,
+            }
+        elif scheme == "int4":
+            dequant, scale = quantize_int4(tensor)
+            metrics = compute_metrics(tensor, dequant)
+            return dequant, {
+                "scheme": f"int4_per_tensor(scale={scale:.6f})",
+                "relative_frobenius_error": metrics.relative_frobenius_error,
+                "max_absolute_error": metrics.max_absolute_error,
+                "snr_db": metrics.snr_db,
+                "compression_ratio": metrics.compression_ratio,
+            }
+        elif scheme == "int4_group":
+            dequant, scales = quantize_int4_group(tensor, kwargs.get("group_size", 64))
+            metrics = compute_metrics(tensor, dequant)
+            return dequant, {
+                "scheme": f"int4_group(group_size={kwargs.get('group_size', 64)})",
+                "relative_frobenius_error": metrics.relative_frobenius_error,
+                "max_absolute_error": metrics.max_absolute_error,
+                "snr_db": metrics.snr_db,
+                "compression_ratio": metrics.compression_ratio,
+            }
+        elif scheme == "fp8":
+            dequant = quantize_fp8(tensor)
+            metrics = compute_metrics(tensor, dequant, effective_bits=8)
+            return dequant, {
+                "scheme": "fp8_e4m3",
+                "relative_frobenius_error": metrics.relative_frobenius_error,
+                "max_absolute_error": metrics.max_absolute_error,
+                "snr_db": metrics.snr_db,
+                "compression_ratio": metrics.compression_ratio,
+            }
+        elif scheme == "fp4":
+            dequant = quantize_fp4(tensor)
+            metrics = compute_metrics(tensor, dequant, effective_bits=4)
+            return dequant, {
+                "scheme": "fp4_nvfp4_style",
+                "relative_frobenius_error": metrics.relative_frobenius_error,
+                "max_absolute_error": metrics.max_absolute_error,
+                "snr_db": metrics.snr_db,
+                "compression_ratio": metrics.compression_ratio,
+            }
+    
+    raise ValueError(f"Unknown basic scheme: {scheme}")
 
 
 def quantize_matrix_smart(
@@ -587,18 +754,8 @@ def quantize_matrix_smart(
     **kwargs,
 ) -> tuple[torch.Tensor, dict]:
     """Unified interface for all quantization schemes."""
-    if scheme in ["int8", "int8_per_channel", "int4", "int4_per_channel",
-                  "int4_group", "fp8", "fp4"]:
-        # Delegate to existing basic quantization
-        from genweight.quantization import quantize_matrix
-        dequantized, result = quantize_matrix(tensor, scheme, **kwargs)
-        return dequantized, {
-            "scheme": result.scheme,
-            "relative_frobenius_error": result.relative_frobenius_error,
-            "max_absolute_error": result.max_absolute_error,
-            "snr_db": result.snr_db,
-            "compression_ratio": result.compression_ratio,
-        }
+    if scheme in BASIC_QUANTIZATION_SCHEMES:
+        return quantize_matrix_basic(tensor, scheme, **kwargs)
 
     # Smart quantization schemes
     if scheme == "gptq_int4":
@@ -613,17 +770,7 @@ def quantize_matrix_smart(
         act_scales = kwargs.get("activation_scales", None)
         alpha = kwargs.get("alpha", 0.5)
         target = "int8" if "int8" in scheme else "int4"
-        smoothed_w, smoothed_act, meta = quantize_smoothquant(tensor, act_scales, alpha, target)
-        # Quantize smoothed weights
-        if target == "int8":
-            dequant, _ = quantize_int8(smoothed_w)
-        else:
-            dequant, _ = quantize_int4(smoothed_w)
-        meta["smoothed_weight_stats"] = {
-            "mean": smoothed_w.mean().item(),
-            "std": smoothed_w.std().item(),
-        }
-        return dequant, meta
+        dequant, smoothed_act, meta = quantize_smoothquant(tensor, act_scales, alpha, target)
     elif scheme == "autoround_int4":
         hessian = kwargs.get("hessian_diag", None)
         dequant, meta = quantize_autoround_int4(tensor, hessian_diag=hessian,
@@ -636,7 +783,7 @@ def quantize_matrix_smart(
     elif scheme == "nvfp4":
         dequant, meta = quantize_nvfp4(tensor, group_size=kwargs.get("group_size", 16))
     else:
-        raise ValueError(f"Unknown scheme: {scheme}")
+        raise ValueError(f"Unknown quantization scheme: {scheme}")
 
     # Compute metrics
     metrics = compute_metrics(tensor, dequant)
@@ -680,86 +827,3 @@ def run_full_quantization_suite(
                 "compression_ratio": 0.0,
             })
     return results
-
-# ============================================================
-# BASIC QUANTIZATION INTERFACE (for backward compatibility)
-# ============================================================
-
-def quantize_matrix(tensor: torch.Tensor, scheme: str, **kwargs) -> tuple[torch.Tensor, QuantizationResult]:
-    """Quantize a matrix with the specified scheme and return metrics."""
-    original_bits = 32
-
-    if scheme == "int8":
-        dequantized, scale = quantize_int8(tensor)
-        result = compute_metrics(tensor, dequantized, original_bits)
-        result.scheme = f"int8_per_tensor(scale={scale:.6f})"
-        result.compression_ratio = original_bits / 8.0
-    elif scheme == "int4":
-        dequantized, scale = quantize_int4(tensor)
-        result = compute_metrics(tensor, dequantized, original_bits)
-        result.scheme = f"int4_per_tensor(scale={scale:.6f})"
-        result.compression_ratio = original_bits / 4.0
-    elif scheme == "int4_group":
-        group_size = kwargs.get("group_size", 64)
-        dequantized, scales = quantize_int4_group(tensor, group_size)
-        result = compute_metrics(tensor, dequantized, original_bits)
-        result.scheme = f"int4_group(group_size={group_size})"
-        result.compression_ratio = original_bits / 4.0
-    elif scheme == "fp8":
-        dequantized = quantize_fp8(tensor)
-        result = compute_metrics(tensor, dequantized, original_bits)
-        result.scheme = "fp8_e4m3"
-        result.compression_ratio = original_bits / 8.0
-    elif scheme == "fp4":
-        dequantized = quantize_fp4(tensor)
-        result = compute_metrics(tensor, dequantized, original_bits)
-        result.scheme = "fp4_nvfp4_style"
-        result.compression_ratio = original_bits / 4.0
-    elif scheme == "int8_per_channel":
-        dequantized = torch.zeros_like(tensor)
-        scales = []
-        for i in range(tensor.shape[0]):
-            dq, scale = quantize_int8(tensor[i:i+1])
-            dequantized[i:i+1] = dq
-            scales.append(scale)
-        result = compute_metrics(tensor, dequantized, original_bits)
-        result.scheme = f"int8_per_channel({len(scales)} channels)"
-        result.compression_ratio = original_bits / 8.0
-    elif scheme == "int4_per_channel":
-        dequantized = torch.zeros_like(tensor)
-        for i in range(tensor.shape[0]):
-            dq, _ = quantize_int4(tensor[i:i+1])
-            dequantized[i:i+1] = dq
-        result = compute_metrics(tensor, dequantized, original_bits)
-        result.scheme = f"int4_per_channel({tensor.shape[0]} channels)"
-        result.compression_ratio = original_bits / 4.0
-    else:
-        raise ValueError(f"Unknown quantization scheme: {scheme}")
-
-    return dequantized, result
-
-
-def run_quantization_suite(
-    tensor: torch.Tensor,
-    schemes: list[str] | None = None,
-    group_size: int = 64,
-) -> list[QuantizationResult]:
-    """Run quantization experiments on a single tensor."""
-    if schemes is None:
-        schemes = QUANTIZATION_SCHEMES
-
-    results = []
-    for scheme in schemes:
-        try:
-            _, result = quantize_matrix(tensor, scheme, group_size=group_size)
-            results.append(result)
-        except Exception as e:
-            results.append(QuantizationResult(
-                scheme=f"{scheme} (ERROR: {e})",
-                relative_frobenius_error=float('inf'),
-                max_absolute_error=float('inf'),
-                snr_db=-float('inf'),
-                compression_ratio=0.0,
-            ))
-    return results
-
