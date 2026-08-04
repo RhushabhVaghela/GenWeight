@@ -115,6 +115,31 @@ def quantize_int4_group(tensor: torch.Tensor, group_size: int = 64) -> tuple[tor
     return dequantized, scales
 
 
+def quantize_int8_per_channel(tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-output-channel INT8 quantization (one scale per output neuron).
+    Standard practice for production LLM inference (e.g. llama.cpp, vLLM).
+    """
+    weight, was_transposed = _get_weight_format(tensor)
+    # weight is [out_features, in_features] after _get_weight_format
+    scales = weight.abs().max(dim=1).values / 127.0  # per-row (output-channel) scale
+    scales = scales.clamp_min(1e-8)
+    quantized = (weight / scales.unsqueeze(1)).round().clamp(-128, 127)
+    dequantized = quantized * scales.unsqueeze(1)
+    dequantized = _restore_weight_format(dequantized, was_transposed)
+    return dequantized, scales
+
+
+def quantize_int4_per_channel(tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-output-channel INT4 quantization (one scale per output neuron)."""
+    weight, was_transposed = _get_weight_format(tensor)
+    scales = weight.abs().max(dim=1).values / 7.0
+    scales = scales.clamp_min(1e-8)
+    quantized = (weight / scales.unsqueeze(1)).round().clamp(-8, 7)
+    dequantized = quantized * scales.unsqueeze(1)
+    dequantized = _restore_weight_format(dequantized, was_transposed)
+    return dequantized, scales
+
+
 def quantize_fp8(tensor: torch.Tensor) -> torch.Tensor:
     """Simulate E4M3 FP8 quantization (approximate with float8_e4m3fn)."""
     weight, was_transposed = _get_weight_format(tensor)
@@ -618,6 +643,26 @@ def quantize_matrix_basic(
             metrics = compute_metrics(tensor, dequant)
             return dequant, {
                 "scheme": f"int4_per_tensor(scale={scale:.6f})",
+                "relative_frobenius_error": metrics.relative_frobenius_error,
+                "max_absolute_error": metrics.max_absolute_error,
+                "snr_db": metrics.snr_db,
+                "compression_ratio": metrics.compression_ratio,
+            }
+        elif scheme == "int8_per_channel":
+            dequant, scales = quantize_int8_per_channel(tensor)
+            metrics = compute_metrics(tensor, dequant)
+            return dequant, {
+                "scheme": "int8_per_channel",
+                "relative_frobenius_error": metrics.relative_frobenius_error,
+                "max_absolute_error": metrics.max_absolute_error,
+                "snr_db": metrics.snr_db,
+                "compression_ratio": metrics.compression_ratio,
+            }
+        elif scheme == "int4_per_channel":
+            dequant, scales = quantize_int4_per_channel(tensor)
+            metrics = compute_metrics(tensor, dequant)
+            return dequant, {
+                "scheme": "int4_per_channel",
                 "relative_frobenius_error": metrics.relative_frobenius_error,
                 "max_absolute_error": metrics.max_absolute_error,
                 "snr_db": metrics.snr_db,
