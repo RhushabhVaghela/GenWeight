@@ -200,7 +200,7 @@ python experiments\E019_perplexity\run.py
 python experiments\E020_mixed_precision\run.py
 ```
 
-Experiment outputs are written under `results/`, which is intentionally ignored by Git. Key numbers are summarized in this README and in `RESEARCH_SUMMARY.md`.
+Experiment outputs are written under `results/`, which is intentionally ignored by Git. Key numbers are summarized in this README, `RESEARCH_SUMMARY.md`, and `research/journal.md`.
 
 ## Project Structure
 
@@ -267,6 +267,7 @@ uv pip install -e .
 - Results are currently CPU-friendly and GPT-2-small focused.
 - Compression ratios in early exploratory scripts are idealized unless otherwise noted; future work should include scale/metadata overhead precisely.
 - Full claims about model quality should be based on standard benchmark datasets, not only the small E019 sentence set.
+- New hypotheses should be added to `research/journal.md` only after an experiment motivates them.
 
 ## License
 

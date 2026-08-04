@@ -1,104 +1,118 @@
 # GenWeight Research Summary
 
-**Project:** Transformer Weight Geometry & Compression Analysis  
-**Model:** GPT-2 (124M)  
-**Duration:** Single research session  
-**Experiments:** 16 (E000–E016)  
-**Total Configurations Tested:** 720+  
-**Status:** Complete ✅
+Project: Transformer weight geometry and compression analysis
 
----
+Model: GPT-2 small, 124M parameters
+
+Current status: active research prototype through E020
 
 ## Executive Summary
 
-GenWeight systematically analyzes the geometric structure of GPT-2's learned weights and evaluates compression methods. The key finding is that **FP8 (E4M3) quantization at 4× compression with ~2.65% Frobenius error is the practical sweet spot**, while INT8 per-channel achieves near-lossless compression (~1.3% error). Smart quantization methods (GPTQ, AWQ, AutoRound) require better calibration to outperform simple group-wise quantization.
+GenWeight began as an investigation into whether transformer weights can be represented by a compact generative object rather than stored as dense matrices. The evidence so far is mixed in an interesting way:
 
----
+- GPT-2 weights are clearly structured and differ strongly from matched Gaussian matrices.
+- The simple generative representations tested so far do not compress weights competitively.
+- Practical compression is currently dominated by quantization.
+- End-to-end behavior is stricter than weight reconstruction error: uniform 4-bit methods damage perplexity badly, while FP8 preserves behavior best in the current test.
 
-## Experiment Catalog
+The strongest current result is E019: FP8 E4M3 produced 2.65% average Frobenius error and slightly improved measured perplexity on the small built-in test corpus, while 4-bit methods with 9-12% Frobenius error caused very large perplexity degradation.
 
-### Phase 1: Foundation (E000–E005)
-| Exp | Focus | Key Result |
-|-----|-------|------------|
-| E000 | Single-layer deep dive | GPT-2 layer 0 `c_attn` is highly structured: eff. rank 394 vs 650 Gaussian, cond. # 45 vs 3.7 |
-| E001 | Coordinate MLP generator | 1000 steps, 5.8% params, ~100% error (doesn't converge well) |
-| E002 | Block dictionary (K-means) | 4–32 codebook: 0.9–7.4% storage, 86–98% error |
-| E003 | Block latent generator | 5000 steps, 15.9% params, 74.8% error (converging) |
-| E004 | Block PCA | Rank 8–128: 2–33% storage, 52–95% error |
-| E005 | Q→K residual compression | Only 3/12 heads align (cos > 0.75); rank-16 residual: 12.3% error |
+## Current Best Evidence
 
-### Phase 2: Generalization (E006)
-| Exp | Focus | Key Result |
-|-----|-------|------------|
-| E006 | 12-layer analysis | **Structure doesn't generalize**: Layer 0 unique (Q/K alignment); deeper layers higher rank (394→577), better conditioned (45→9) |
+### Behavioral Compression, E019
 
-### Phase 3: Quantization Sensitivity (E007–E008)
-| Exp | Focus | Key Result |
-|-----|-------|------------|
-| E007 | INT8/INT4/FP8 on 48 matrices | **INT8 per-channel = 1.3% error**; FP8 = 2.65%; Group INT4 = 11% |
-| E008 | Combined pipelines | Quantization dominates; QK-reuse + low-rank + quant adds little benefit |
+| Scheme | Avg Frobenius Error | Perplexity | Change vs FP32 |
+|---|---:|---:|---:|
+| FP32 baseline | - | 95.23 | - |
+| FP8 E4M3 | 2.65% | 93.12 | -2.22% |
+| INT8 per-channel | 1.01% | 103.87 | +9.07% |
+| INT4 group, g=32 | 9.99% | 1205.43 | +1165.76% |
+| INT4 group, g=64 | 11.29% | 1908.20 | +1903.70% |
+| NVFP4 | 9.30% | 7515.54 | +7791.68% |
+| GGUF Q4_K | 12.25% | 30198.05 | +31609.40% |
+| INT4 per-channel | 17.11% | 586463.79 | +615715.17% |
 
-### Phase 4: Smart Quantization (E009–E015)
-| Exp | Method | Best Error | Notes |
-|-----|--------|------------|-------|
-| E009 | GPTQ (Hessian) | 24–30% | Underperforms naive INT4_group |
-| E010 | AWQ (calibration) | 25–66% | Needs better activation scaling |
-| E011 | SmoothQuant | 7–125% | Fails on rectangular matrices |
-| E012 | AutoRound | 14–71% | Best learned rounding, competitive |
-| E013 | NF4 | 35–90% | Needs proper block normalization |
-| E014 | GGUF Q4_K | **11–16%** | Strong practical 4-bit method |
-| E015 | NVFP4 | **10–12%** | Best 4-bit format, hardware-friendly |
+Conclusion: FP8 is the current practical winner. INT8 per-channel reconstructs weights most accurately but caused a modest perplexity increase in this small evaluation. Uniform 4-bit quantization is not safe yet.
 
-### Phase 5: Comprehensive Benchmark (E016)
-| Exp | Scope | Key Result |
-|-----|-------|------------|
-| E016 | 15 schemes × 48 matrices = 720 configs | **FP8 best overall** (2.65% avg); INT8 per-channel near-lossless |
+### Weight-Space Quantization, E017
 
----
+| Scheme | Avg Error | Main Takeaway |
+|---|---:|---|
+| INT8 per-channel | 1.01% | Best reconstruction |
+| NVFP4 | 9.30% | Best tested 4-bit weight error |
+| INT4 group, g=32 | 9.99% | Strong group-wise baseline |
+| INT4 group, g=64 | 11.29% | Slightly worse than g=32 |
+| GGUF Q4_K | 12.25% | Sensitive on some matrices |
+| INT4 per-channel | 17.11% | Too coarse |
 
-## Best Scheme Per Layer Type
+Conclusion: Weight error alone made some 4-bit methods look promising, but E019 showed that behavior can still collapse. Future compression must include perplexity or task-level checks.
 
-| Layer Type | Best Scheme | Error | Compression |
-|------------|-------------|-------|-------------|
-| Embeddings (wte/wpe) | **FP8** | 2.6% | 4× |
-| Attention c_attn | **FP8 / INT8** | 2.0–3.2% | 4× |
-| Attention c_proj | **FP8** | 2.6% | 4× |
-| MLP c_fc | **FP8 / INT8** | 2.2–4.6% | 4× |
-| MLP c_proj | **FP8** | 2.6% | 4× |
+### Weight Geometry, E000 and E006
 
----
+Layer 0 `h.0.attn.c_attn.weight` is more structured than a matched Gaussian baseline:
 
-## Scientific Conclusions
+- Effective rank: 394 vs 650 Gaussian
+- Condition number: 45.5 vs about 3.7 Gaussian
+- Energy rank 90%: 399 vs 559 Gaussian
+- Energy rank 95%: 501 vs 641 Gaussian
 
-1. **FP8 (E4M3) is the practical sweet spot** — consistent ~2.65% error at 4× across all 48 matrices
-2. **INT8 per-channel is virtually lossless** (~1.3% error) — use for production deployment
-3. **Smart quantization (GPTQ/AWQ) underperforms simple INT4_group on GPT-2** — their importance heuristics need better calibration data
-4. **Weight structure varies by layer, not depth**:
-   - Embeddings: FP8 optimal
-   - Attention: FP8/INT8 optimal
-   - MLP: FP8 optimal; c_proj very sensitive to 4-bit
-5. **SmoothQuant fails on non-square matrices** — channel migration assumes square weight matrices
-6. **NVFP4 microscaling is promising** — 11% error at 4× with hardware-friendly format
-7. **Q/K weight reuse is a layer-0 phenomenon** — only 3/12 heads align in layer 0; zero heads in layers 1–11
+Across attention layers, the structure changes:
 
----
+- Effective rank generally increases with depth.
+- Condition number generally decreases with depth.
+- Q/K reuse is strong only in layer 0 and only for a few heads.
 
-## Reproducibility
+Conclusion: structure exists, but it is not uniform enough for one simple global compression rule.
 
-```bash
-# Run any experiment
-cd /d/Research Experiments/GenWeight
-.\.venv\Scripts\activate
-set PYTHONPATH=""
-python experiments\E016_quantization_benchmark\run.py
-```
+### Generative and Structural Compression, E001-E005
 
-Results saved to `results/E###/summary.json` with plots in `results/E###/*.png`.
+| Experiment | Method | Result |
+|---|---|---|
+| E001 | Coordinate MLP | About 100% error; simple coordinate field failed |
+| E002 | Block dictionary | 86-98% error; dictionary too coarse |
+| E003 | Latent block generator | 74.8% error at 15.9% params after 5000 steps |
+| E004 | Block PCA | 70.6% error at 16.6% storage |
+| E005 | Q/K residual reuse | Real layer-0 Q/K reuse, but only about 1.06x compression at rank 16 |
 
----
+Conclusion: the original generative hypothesis remains scientifically interesting, but the naive implementations are not competitive.
 
-## Repository
+## Experiment Ledger
 
-**GitHub:** https://github.com/RhushabhVaghela/GenWeight  
-**Commits:** 8 (incremental, one per experiment batch)  
-**Total Files:** 30+ modules, 16 experiments, 4000+ lines of research code
+| ID | Status | Question | Outcome |
+|---|---|---|---|
+| E000 | Complete | Is one GPT-2 matrix random or structured? | Structured: low effective rank and high anisotropy vs Gaussian |
+| E001 | Complete | Can coordinates predict weights? | No useful reconstruction at tested size |
+| E002 | Complete | Can block dictionaries compress weights? | Not competitive |
+| E003 | Complete | Can a latent block generator learn weight blocks? | Learns slowly, still high error |
+| E004 | Complete | Is block PCA a stronger baseline? | Yes, but still too lossy |
+| E005 | Complete | Can K be generated from Q plus residual? | Only for 3 layer-0 heads, weak compression |
+| E006 | Complete | Does layer-0 structure generalize? | No; deeper layers differ substantially |
+| E007 | Complete | How sensitive are all 2D matrices to simple quantization? | INT8/FP8 strong; INT4 mixed |
+| E008 | Complete | Do combined pipelines beat quantization? | No meaningful win over direct quantization |
+| E009 | Complete | Do GPTQ/AWQ-style prototypes help? | Not yet; proxy methods underperform |
+| E010 | Complete | Does activation calibration improve AWQ? | Explored, not yet a clear win |
+| E016 | Complete | What happens across 15 schemes and 48 matrices? | FP8 and INT8 per-channel dominate weight-space error |
+| E017 | Complete | How do per-channel and group-wise schemes compare? | INT8 per-channel best; NVFP4 best 4-bit by error |
+| E018 | Implemented | Can true calibration Hessians improve GPTQ-like quantization? | Pending validation |
+| E019 | Complete | Do quantized weights preserve perplexity? | FP8 preserves behavior; uniform 4-bit fails |
+| E020 | Implemented | Can mixed precision recover 4-bit savings safely? | Pending validation |
+
+## Current Direction
+
+The next scientifically justified step is E020 mixed precision.
+
+Reason:
+
+1. E017 shows some 4-bit methods are numerically decent.
+2. E019 shows uniform 4-bit quantization destroys behavior.
+3. Therefore the next hypothesis is sensitivity-aware allocation: keep behavior-critical layers at FP8 or INT8 and use 4-bit only where the model tolerates it.
+
+After E020, the next credibility upgrade is a standard perplexity dataset such as WikiText-2, because the current E019 corpus is intentionally small and local.
+
+## Research Rules Going Forward
+
+1. Every new algorithmic hypothesis should be motivated by an experiment.
+2. Every compression claim must report both weight error and behavior-level quality.
+3. Every experiment should produce code, numeric output, a written interpretation, and a commit.
+4. Random or matched baselines should be used whenever a claim says GPT-2 is special.
+5. Results should be documented in `research/journal.md` before being generalized into README conclusions.
